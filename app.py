@@ -1,20 +1,30 @@
-from flask import Flask, render_template, redirect, url_for, session, flash
+from flask import Flask, render_template, redirect, url_for, session, flash, request, jsonify
 from flask_wtf import FlaskForm
 from wtforms import StringField, PasswordField, SubmitField, SelectField, DateField
 from wtforms.validators import DataRequired, Email, ValidationError
 import bcrypt
 import psycopg2
 from psycopg2.extras import DictCursor
+from agent import (
+    extract_text_from_pdf,
+    generate_combined_response,
+    load_user_conversation_history,
+    save_user_conversation_history,
+)
+from dotenv import load_dotenv
+import os
 
 app = Flask(__name__)
 
-# PostgreSQL Configuration
-app.config['DB_HOST'] = 'localhost'
-app.config['DB_NAME'] = 'Admission'
-app.config['DB_USER'] = 'postgres'
-app.config['DB_PASSWORD'] = '1234'
-app.config['SECRET_KEY'] = 'index'
+# Load environment variables
+load_dotenv()
 
+# PostgreSQL Configuration
+app.config['DB_HOST'] = os.getenv('DB_HOST')
+app.config['DB_NAME'] = os.getenv('DB_NAME')
+app.config['DB_USER'] = os.getenv('DB_USER')
+app.config['DB_PASSWORD'] = os.getenv('DB_PASSWORD')
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY')
 
 def get_db_connection():
     return psycopg2.connect(
@@ -155,8 +165,6 @@ def info():
         return render_template('info.html')
         
 
-
-
 @app.route('/apply', methods=['GET', 'POST'])
 def apply():
     if 'user_id' not in session:
@@ -189,22 +197,41 @@ def apply():
     return render_template('apply.html', form=form)
 
 
-@app.route('/chat')
+@app.route('/chat', methods=['GET', 'POST'])
 def chat():
-    if 'user_id' in session:
-        user_id = session['user_id']
+    # Check if the user is logged in, otherwise assign 'guest' as the user ID
+    user_id = session.get('user_id', None)
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM users WHERE id = %s", (user_id,))
-        user = cursor.fetchone()
-        cursor.close()
-        conn.close()
+    if request.method == 'POST':
+        try:
+            pdf_data = extract_text_from_pdf("DIU.pdf")
 
-        if user:
-            return render_template('chat.html', user=user)
-    else:
-        return render_template('chat.html')
+            # For guest users, do not load or save history
+            if user_id:
+                chat_history = load_user_conversation_history(user_id)
+            else:
+                chat_history = []
+
+            user_input = request.json["message"]
+            chat_history.append({"role": "user", "message": user_input})
+
+            response = generate_combined_response(pdf_data, user_input, chat_history)
+
+            chat_history.append({"role": "assistant", "message": response})
+
+            # Save history only for logged-in users
+            if user_id:
+                save_user_conversation_history(user_id, chat_history)
+
+            return jsonify({"reply": response})
+        except Exception as e:
+            print("Error in Chat:", e)
+            return jsonify({"error": str(e)}), 500
+
+    # For guest users, do not load history
+    chat_history = load_user_conversation_history(user_id) if user_id else []
+    return render_template('chat.html', chat_history=chat_history)
+
 
 @app.route('/payment')
 def payment():
@@ -221,16 +248,11 @@ def payment():
         if user:
             return render_template('payment.html', user=user)
 
-    
-
 @app.route('/logout')
 def logout():
     session.pop('user_id', None)
     flash("You have been logged out successfully.")
     return redirect(url_for('login'))
-
-
-
 
 if __name__ == '__main__':
     app.run(debug=True)
